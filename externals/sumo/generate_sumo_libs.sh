@@ -125,18 +125,35 @@ cmake_path() {
 }
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-PROJ_ROOT=${PROJ_ROOT:-$script_dir/../externals/proj/$platform}
+
+if [[ -n "${PROJ_ROOT:-}" ]]; then
+    # Keep an explicitly configured PROJ_ROOT.
+    :
+elif [[ -s "$script_dir/../proj/$platform/include/proj.h" ]]; then
+    PROJ_ROOT="$script_dir/../proj/$platform"
+else
+    proj_tag=proj-v9.8.1_1
+    case "$platform" in
+        linux) proj_archive=proj-linux.tar.xz ;;
+        mac)   proj_archive=proj-macos.tar.xz ;;
+        v10)   proj_archive=proj-windows.tar.xz ;;
+        *) fail "No PROJ package available for platform: $platform" ;;
+    esac
+
+    proj_cache="${WORK_DIR:-$PWD}/dependencies/$proj_tag"
+    mkdir -p "$proj_cache"
+    if [[ ! -s "$proj_cache/$proj_archive" ]]; then
+        curl --fail --location \
+            "https://github.com/esmini/esmini-dependencies/releases/download/$proj_tag/$proj_archive" \
+            --output "$proj_cache/$proj_archive"
+    fi
+    tar -xJf "$proj_cache/$proj_archive" -C "$proj_cache"
+    PROJ_ROOT="$proj_cache/$platform"
+fi
+
 [[ -s "$PROJ_ROOT/include/proj.h" ]] ||
-    fail "Static PROJ package not found at $PROJ_ROOT. Set PROJ_ROOT to esmini's platform PROJ package."
+    fail "Static PROJ package not found at $PROJ_ROOT."
 PROJ_ROOT=$(cd "$PROJ_ROOT" && pwd -P)
-for configuration in "${configurations[@]}"; do
-    proj_suffix=
-    [[ "$configuration" != Debug ]] || proj_suffix=d
-    for library in proj sqlite3; do
-        [[ -s "$PROJ_ROOT/lib/${lib_prefix}${library}${proj_suffix}.$lib_ext" ]] ||
-            fail "Missing $configuration static library in PROJ_ROOT: ${lib_prefix}${library}${proj_suffix}.$lib_ext"
-    done
-done
 
 check_source() {
     local directory=$1 version=$2 expected
