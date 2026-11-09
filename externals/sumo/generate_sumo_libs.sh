@@ -13,6 +13,7 @@
 # Environment overrides:
 #   WORK_DIR             Source/build root (default: current directory)
 #   PARALLEL_BUILDS      Parallel build jobs (default: 8)
+#   REBUILD_DEPENDENCIES Reconfigure/build cached zlib and Xerces (default: 0)
 #   GENERATOR            CMake generator (Windows: Visual Studio 17 2022)
 #   GENERATOR_TOOLSET    Windows toolset (default: v142)
 #   MACOS_ARCHITECTURES  macOS architectures (default: arm64;x86_64)
@@ -22,7 +23,8 @@
 #   SEVEN_ZIP            7-Zip executable (default: PATH or Windows install)
 #
 # Debug and Release are built separately on Windows/Linux; macOS builds
-# universal Release archives. Rerunning resumes the builds through CMake,
+# universal Release archives. Rerunning reuses completed dependency builds,
+# repairs its managed SUMO sparse checkout and resumes SUMO through CMake,
 # stages a fresh platform package, and replaces the versioned .7z archive.
 # PROJ/SQLite are reused from esmini, not included in the SUMO package.
 
@@ -33,6 +35,7 @@ ZLIB_VERSION=v1.2.12
 XERCES_VERSION=v3.2.5
 SUMO_VERSION=v1_28_0
 PARALLEL_BUILDS=${PARALLEL_BUILDS:-8}
+REBUILD_DEPENDENCIES=${REBUILD_DEPENDENCIES:-0}
 
 fail() {
     printf 'ERROR: %s\n' "$*" >&2
@@ -41,6 +44,8 @@ fail() {
 
 [[ $# == 0 ]] || fail "No command-line arguments are supported; use the documented environment overrides."
 [[ "$PARALLEL_BUILDS" =~ ^[1-9][0-9]*$ ]] || fail "PARALLEL_BUILDS must be a positive integer."
+[[ "$REBUILD_DEPENDENCIES" == 0 || "$REBUILD_DEPENDENCIES" == 1 ]] ||
+    fail "REBUILD_DEPENDENCIES must be 0 or 1."
 
 generator_args=()
 platform_args=()
@@ -152,7 +157,9 @@ else
             "https://github.com/esmini/esmini-dependencies/releases/download/$proj_tag/$proj_archive" \
             --output "$proj_cache/$proj_archive"
     fi
-    tar -xJf "$proj_cache/$proj_archive" -C "$proj_cache"
+    if [[ ! -s "$proj_cache/$platform/include/proj.h" ]]; then
+        tar -xJf "$proj_cache/$proj_archive" -C "$proj_cache"
+    fi
     PROJ_ROOT="$proj_cache/$platform"
 fi
 
@@ -161,13 +168,19 @@ fi
 PROJ_ROOT=$(cd "$PROJ_ROOT" && pwd -P)
 
 check_source() {
-    local directory=$1 version=$2 expected
+    local directory=$1 version=$2 name=${3:-} expected
+    local status_args=()
     [[ -e "$directory/.git" ]] || fail "Not a Git checkout: $directory"
     expected=$(git -C "$directory" rev-parse --verify "refs/tags/${version}^{commit}") ||
         fail "Missing release tag $version in $directory."
     [[ "$(git -C "$directory" rev-parse HEAD)" == "$expected" ]] ||
         fail "$directory must be at $version. Use a separate release checkout; this script will not switch it."
-    [[ -z "$(git -C "$directory" status --porcelain)" ]] ||
+    if [[ "$name" == zlib && ! -e "$directory/zconf.h" && -f "$directory/zconf.h.included" ]] &&
+        [[ "$(git -C "$directory" hash-object --path=zconf.h "$directory/zconf.h.included")" == \
+           "$(git -C "$directory" rev-parse HEAD:zconf.h)" ]]; then
+        status_args=(-- . ':(exclude)zconf.h' ':(exclude)zconf.h.included')
+    fi
+    [[ -z "$(git -C "$directory" status --porcelain "${status_args[@]}")" ]] ||
         fail "Source checkout is not clean: $directory"
 }
 
@@ -184,22 +197,31 @@ mkdir -p "$source_root"
 
 fetch_source() {
     local name=$1 version=$2 url=$3 directory="$source_root/$1-$2"
+    local fresh_checkout=0
     if [[ ! -e "$directory" ]]; then
         git clone --depth 1 --branch "$version" --no-checkout "$url" "$directory"
+        fresh_checkout=1
         case "$name" in
             zlib)
                 # zlib's CMake renames tracked zconf.h in out-of-source builds.
                 # Omit it so only the generated build-tree header is used.
-                git -C "$directory" sparse-checkout set --no-cone '/*' '!/zconf.h'
-                ;;
-            sumo)
-                git -C "$directory" sparse-checkout set --no-cone \
-                    '/*' '!/*/' '/src/' '/build_config/' '/tools/' '/data/'
+                printf '%s\n' '/*' '!/zconf.h' |
+                    git -C "$directory" sparse-checkout set --no-cone --stdin
                 ;;
         esac
+    else
+        check_source "$directory" "$version" "$name"
+    fi
+    if [[ "$name" == sumo ]]; then
+        # Standard input avoids Git Bash converting patterns to Windows paths.
+        # Reapply after validation to also repair clean cached sparse checkouts.
+        printf '%s\n' '/*' '!/*/' '/src/' '/build_config/' '/tools/' '/data/' |
+            git -C "$directory" sparse-checkout set --no-cone --stdin
+    fi
+    if [[ "$fresh_checkout" == 1 ]]; then
         git -C "$directory" -c advice.detachedHead=false checkout --detach "$version"
     fi
-    check_source "$directory" "$version"
+    check_source "$directory" "$version" "$name"
 }
 
 fetch_source zlib "$ZLIB_VERSION" https://github.com/madler/zlib.git
@@ -293,22 +315,33 @@ for configuration in "${configurations[@]}"; do
         fi
     fi
 
-    configure "$zlib_source" "$zlib_build"
-    build_targets "$zlib_build" zlibstatic
+    if [[ "$REBUILD_DEPENDENCIES" == 1 || ! -s "$zlib_build/CMakeCache.txt" ||
+          ! -s "$zlib_build/lib/$zlib_name" || ! -s "$zlib_build/zconf.h" ]]; then
+        configure "$zlib_source" "$zlib_build"
+        build_targets "$zlib_build" zlibstatic
+    else
+        printf 'Reusing %s zlib: %s\n' "$configuration" "$zlib_build"
+    fi
     require_file "$zlib_build/lib/$zlib_name"
     cp -p "$zlib_source/zlib.h" "$zlib_build/zconf.h" "$prefix/include/"
     cp -p "$zlib_build/lib/$zlib_name" "$prefix/lib/"
 
-    configure "$xerces_source" "$xerces_build" \
-        -DBUILD_SHARED_LIBS=OFF -Dnetwork=OFF -Dmessage-loader=inmemory \
-        -DCMAKE_DISABLE_FIND_PACKAGE_ICU=ON
-    build_targets "$xerces_build" xerces-c
+    if [[ "$REBUILD_DEPENDENCIES" == 1 || ! -s "$xerces_build/CMakeCache.txt" ||
+          ! -s "$xerces_build/lib/$xerces_name" ]]; then
+        configure "$xerces_source" "$xerces_build" \
+            -DBUILD_SHARED_LIBS=OFF -Dnetwork=OFF -Dmessage-loader=inmemory \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ICU=ON
+        build_targets "$xerces_build" xerces-c
+    else
+        printf 'Reusing %s Xerces: %s\n' "$configuration" "$xerces_build"
+    fi
     require_file "$xerces_build/lib/$xerces_name"
     # Install only headers/export metadata; the runtime component includes
     # sample executables which are deliberately not built.
     cmake --install "$(cmake_path "$xerces_build")" --config "$configuration" --component development
     cp -p "$xerces_build/lib/$xerces_name" "$prefix/lib/"
 
+    printf '\n---------------- Configuring SUMO (%s) ----------------\n' "$configuration"
     configure "$SUMO_SOURCE_DIR" "$sumo_build" "${sumo_options[@]}" \
         "-DPROJ_INCLUDE_DIR=$(cmake_path "$PROJ_ROOT/include")" \
         "-DPROJ_LIBRARY=$(cmake_path "$PROJ_ROOT/lib/${lib_prefix}proj${proj_suffix}.$lib_ext")" \
@@ -318,6 +351,8 @@ for configuration in "${configurations[@]}"; do
         "-DZLIB_LIBRARY=$(cmake_path "$prefix/lib/$zlib_name")" \
         "-DXercesC_INCLUDE_DIR=$(cmake_path "$prefix/include")" \
         "-DXercesC_LIBRARY=$(cmake_path "$prefix/lib/$xerces_name")"
+
+    printf '\n---------------- Building SUMO (%s) ----------------\n' "$configuration"
     build_targets "$sumo_build" libsumostatic "${sumo_modules[@]}"
     require_file "$sumo_build/lib/$sumo_name"
     for module in "${sumo_modules[@]}"; do
