@@ -4,7 +4,7 @@
 # Run from a scratch directory with Bash (Git Bash on Windows). No system
 # installation or administrator privileges are required.
 #
-# Prerequisites: Git, CMake >= 3.18 and < 4, Python 3, a C++17 compiler,
+# Prerequisites: Git, CMake >= 3.18 and < 5, Python 3, a C++17 compiler,
 # esmini's static PROJ package (including SQLite), and external 7-Zip.
 # USE_SUMO requires USE_PROJ in esmini.
 # Windows defaults to Visual Studio 2022 with the v142 x64 toolset installed.
@@ -44,6 +44,7 @@ fail() {
 
 generator_args=()
 platform_args=()
+cmake_policy_args=()
 configurations=(Debug Release)
 case "$OSTYPE" in
     msys*|cygwin*)
@@ -92,7 +93,11 @@ cmake_version=$(cmake --version | sed -n '1s/^cmake version //p')
 cmake_major=${BASH_REMATCH[1]}
 cmake_minor=${BASH_REMATCH[2]}
 (( cmake_major == 3 && cmake_minor >= 18 )) ||
-    fail "CMake 3.18 through 3.x is required by the pinned dependency projects; found $cmake_version."
+    (( cmake_major == 4 )) ||
+    fail "CMake 3.18 through 4.x is required by the pinned dependency projects; found $cmake_version."
+if (( cmake_major == 4 )); then
+    cmake_policy_args=(-DCMAKE_POLICY_VERSION_MINIMUM=3.5)
+fi
 
 python_command=
 for candidate in python python3; do
@@ -240,7 +245,7 @@ configure() {
     local source=$1 build=$2
     shift 2
     MSYS2_ARG_CONV_EXCL='*' cmake -S "$(cmake_path "$source")" -B "$(cmake_path "$build")" \
-        -G "$GENERATOR" "${generator_args[@]}" "${platform_args[@]}" \
+        -G "$GENERATOR" "${generator_args[@]}" "${platform_args[@]}" "${cmake_policy_args[@]}" \
         "-DCMAKE_BUILD_TYPE=$configuration" \
         "-DCMAKE_CONFIGURATION_TYPES=$configuration" \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
