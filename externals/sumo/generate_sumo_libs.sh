@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Build headless SUMO static libraries for embedded integration in esmini.
-# Run from a scratch directory with Bash (Git Bash on Windows). No system
+# Run from a scratch directory with Bash 3.2+ (Git Bash on Windows). No system
 # installation or administrator privileges are required.
 #
 # Prerequisites: Git, CMake >= 3.18 and < 5, Python 3, a C++17 compiler,
@@ -180,7 +180,8 @@ check_source() {
            "$(git -C "$directory" rev-parse HEAD:zconf.h)" ]]; then
         status_args=(-- . ':(exclude)zconf.h' ':(exclude)zconf.h.included')
     fi
-    [[ -z "$(git -C "$directory" status --porcelain "${status_args[@]}")" ]] ||
+    # Bash 3.2 treats empty arrays as unset under nounset.
+    [[ -z "$(git -C "$directory" status --porcelain ${status_args[@]+"${status_args[@]}"})" ]] ||
         fail "Source checkout is not clean: $directory"
 }
 
@@ -267,7 +268,8 @@ configure() {
     local source=$1 build=$2
     shift 2
     MSYS2_ARG_CONV_EXCL='*' cmake -S "$(cmake_path "$source")" -B "$(cmake_path "$build")" \
-        -G "$GENERATOR" "${generator_args[@]}" "${platform_args[@]}" "${cmake_policy_args[@]}" \
+        -G "$GENERATOR" ${generator_args[@]+"${generator_args[@]}"} \
+        ${platform_args[@]+"${platform_args[@]}"} ${cmake_policy_args[@]+"${cmake_policy_args[@]}"} \
         "-DCMAKE_BUILD_TYPE=$configuration" \
         "-DCMAKE_CONFIGURATION_TYPES=$configuration" \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
