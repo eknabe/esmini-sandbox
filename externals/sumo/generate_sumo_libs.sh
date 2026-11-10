@@ -31,7 +31,7 @@
 set -Eeuo pipefail
 trap 'printf "ERROR: SUMO build failed at line %s. See the output above.\n" "$LINENO" >&2' ERR
 
-ZLIB_VERSION=v1.2.12
+ZLIB_VERSION=v1.3.1
 XERCES_VERSION=v3.2.5
 SUMO_VERSION=v1_28_0
 PARALLEL_BUILDS=${PARALLEL_BUILDS:-8}
